@@ -1,0 +1,60 @@
+#!/usr/bin/env ruby
+
+%w(open-uri logger pathname yaml).each { |f| require(f) }
+
+module Webhooks
+  @config = YAML.load_file(
+    Pathname.new(File.expand_path(File.dirname(__FILE__))).join("config.yml")
+  ).freeze
+
+  module_function
+
+  def config
+    @config
+  end
+
+  def hook_for_app(app_name)
+    @config.fetch(:apps).fetch(app_name, :meeting).to_sym
+  end
+
+  def trigger(hook_name)
+    url = @config.fetch(:hooks).fetch(hook_name) { raise ArgumentError, "Unknown hook: #{hook_name}" }
+    URI.parse(url).read
+  end
+end
+
+def is_active?(line) = line.match(/running: (yes|no)/)[1] == "yes"
+
+def app_name(line)
+  pid = line.match(/client (\d+)/)[1]
+  full_command = IO.popen(["ps", "-p", pid, "-o", "comm="]).gets(chomp: true) || "unknown"
+  full_command.match(/\/([^\/]+\.app)/)[1] || full_command
+end
+
+io = IO.popen(
+  [
+    "/usr/bin/log",
+    "stream",
+    "--predicate",
+    %q(sender == "CoreAudio" && eventMessage contains "running: ")
+  ],
+  autoclose: false
+)
+
+logger = Logger.new(STDOUT)
+logger.debug "Loaded config: #{Webhooks.config}"
+
+loop do
+  line = io.gets(chomp: true)
+  next unless line && line.include?("coreaudiod")
+
+  hook_name = if is_active?(line)
+    Webhooks.hook_for_app app_name(line)
+  else
+    :clear
+  end
+
+  Webhooks.trigger(hook_name)
+
+  logger.info "Microphone #{is_active?(line) ? 'in use' : 'off  '}, app: #{app_name(line)}, used mode: #{hook_name}"
+end
